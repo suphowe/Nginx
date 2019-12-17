@@ -260,6 +260,7 @@ http {
       #ssl配置参数（选择性配置）
       ssl_session_cache    shared:SSL:1m;
       ssl_session_timeout  5m;
+
       #数字签名，此处使用MD5
       ssl_ciphers  HIGH:!aNULL:!MD5;
       ssl_prefer_server_ciphers  on;
@@ -269,4 +270,137 @@ http {
           index  index.html index.htm;
       }
   }
+```
+
+## 静态站点配置
+有时候，我们需要配置静态站点(即 html 文件和一堆静态资源)。
+
+举例来说：如果所有的静态资源都放在了 /app/dist 目录下，我们只需要在 nginx.conf 中指定首页以及这个站点的 host 即可
+```
+#启动进程,通常设置成和cpu的数量相等
+worker_processes  1;
+
+
+#工作模式及连接数上限
+events {
+    worker_connections  1024;
+}
+
+#设定http服务器，利用它的反向代理功能提供负载均衡支持
+http {
+    #设定mime类型(邮件支持类型),类型由mime.types文件定义
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    #sendfile 指令指定 nginx 是否调用 sendfile 函数（zero copy 方式）来输出文件，对于普通应用，
+    #必须设为 on,如果用来进行下载等应用磁盘IO重负载应用，可设置为 off，以平衡磁盘与网络I/O处理速度，降低系统的uptime.
+    sendfile        on;
+
+    #连接超时时间
+    keepalive_timeout  65;
+
+    #gzip压缩开关
+    gzip on;
+    gzip_types text/plain application/x-javascript text/css application/xml text/javascript application/javascript image/jpeg image/gif image/png;
+    gzip_vary on;
+
+    #HTTP服务器
+    server {
+        #监听80端口，80端口是知名端口号，用于HTTP协议
+        listen       80;
+        server_name  static.zp.cn;
+
+        #反向代理的路径（和upstream绑定），location 后面设置映射的路径
+        location / {
+            root /app/dist;
+            index index.html;
+            #转发任何请求到 index.html
+        }
+    }
+}
+```
+- 然后，添加 HOST：
+```
+127.0.0.1 static.zp.cn
+```
+此时，在本地浏览器访问 static.zp.cn ，就可以访问静态站点了
+
+## 跨域解决方案
+web 领域开发中，经常采用前后端分离模式。这种模式下，前端和后端分别是独立的 web 应用程序，例如：后端是 Java 程序，前端是 React 或 Vue 应用。
+
+各自独立的 web app 在互相访问时，势必存在跨域问题。解决跨域问题一般有两种思路：
+
+CORS
+在后端服务器设置 HTTP 响应头，把你需要运行访问的域名加入加入 Access-Control-Allow-Origin 中。
+
+jsonp
+把后端根据请求，构造json数据，并返回，前端用 jsonp 跨域。
+
+这两种思路，本文不展开讨论。
+
+需要说明的是，nginx 根据第一种思路，也提供了一种解决跨域的解决方案。
+
+举例：www.helloworld.com 网站是由一个前端 app ，一个后端 app 组成的。前端端口号为 9000， 后端端口号为 8080。
+
+前端和后端如果使用 http 进行交互时，请求会被拒绝，因为存在跨域问题。来看看，nginx 是怎么解决的吧：
+
+- 首先，在 enable-cors.conf 文件中设置 cors ：
+```
+# allow origin list
+set $ACAO '*';
+
+# set single origin
+if ($http_origin ~* (www.helloworld.com)$) {
+  set $ACAO $http_origin;
+}
+
+if ($cors = "trueget") {
+    add_header 'Access-Control-Allow-Origin' "$http_origin";
+    add_header 'Access-Control-Allow-Credentials' 'true';
+    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+    add_header 'Access-Control-Allow-Headers' 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type';
+}
+
+if ($request_method = 'OPTIONS') {
+  set $cors "${cors}options";
+}
+
+if ($request_method = 'GET') {
+  set $cors "${cors}get";
+}
+
+if ($request_method = 'POST') {
+  set $cors "${cors}post";
+}
+```
+- 接下来，在你的服务器中 include enable-cors.conf 来引入跨域配置：
+```
+# ----------------------------------------------------
+# 此文件为项目 nginx 配置片段
+# 可以直接在 nginx config 中 include（推荐）
+# 或者 copy 到现有 nginx 中，自行配置
+# www.helloworld.com 域名需配合 dns hosts 进行配置
+# 其中，api 开启了 cors，需配合本目录下另一份配置文件
+# ----------------------------------------------------
+upstream front_server{
+  server www.helloworld.com:9000;
+}
+upstream api_server{
+  server www.helloworld.com:8080;
+}
+
+server {
+  listen       80;
+  server_name  www.helloworld.com;
+
+  location ~ ^/api/ {
+    include enable-cors.conf;
+    proxy_pass http://api_server;
+    rewrite "^/api/(.*)$" /$1 break;
+  }
+
+  location ~ ^/ {
+    proxy_pass http://front_server;
+  }
+}
 ```
